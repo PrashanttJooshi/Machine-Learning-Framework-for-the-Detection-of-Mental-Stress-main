@@ -1,31 +1,59 @@
 from flask import Flask, render_template, Response, jsonify, request
 from PIL import Image
 import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend for server
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
 import base64
 import os
-import cv2
-import numpy as np
-from keras.models import load_model
-from tensorflow.keras.preprocessing.image import img_to_array
+import sys
+import traceback
 
 app = Flask(__name__)
 
-# Global variables for storing data
+# Global variables
 stress_levels = []
 emotions = []
-emotion_counts = {}
-
-# Define the emotions
 emotion_labels = ['Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise', 'Stress']
 emotion_counts = {label: 0 for label in emotion_labels}
 
-# Load face detection model
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+print("=" * 80)
+print("FLASK APP STARTING...")
+print("=" * 80)
 
-# Global classifier variable
+# Try to import heavy dependencies
+try:
+    import cv2
+    print("✅ OpenCV imported successfully")
+except Exception as e:
+    print(f"❌ OpenCV import failed: {e}")
+    cv2 = None
+
+try:
+    import numpy as np
+    print("✅ NumPy imported successfully")
+except Exception as e:
+    print(f"❌ NumPy import failed: {e}")
+    np = None
+
+try:
+    from keras.models import load_model
+    from tensorflow.keras.preprocessing.image import img_to_array
+    print("✅ Keras/TensorFlow imported successfully")
+except Exception as e:
+    print(f"❌ Keras/TensorFlow import failed: {e}")
+    load_model = None
+
+# Load face cascade
+face_cascade = None
+try:
+    if cv2:
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        print("✅ Face cascade loaded successfully")
+except Exception as e:
+    print(f"❌ Face cascade failed: {e}")
+
+# Model loading with error handling
 classifier = None
 
 def load_emotion_model():
@@ -33,198 +61,143 @@ def load_emotion_model():
     global classifier
     if classifier is None:
         try:
-            # Load the model - only use model_weights_78.h5
+            if load_model is None:
+                print("⚠️  Keras not available, cannot load model")
+                return None
+            
             classifier = load_model('model_weights_78.h5')
             print("✅ Emotion model loaded successfully")
+        except FileNotFoundError:
+            print("❌ ERROR: model_weights_78.h5 not found in /app/")
+            print(f"Current directory: {os.getcwd()}")
+            print(f"Files in current directory: {os.listdir('.')}")
+            return None
         except Exception as e:
-            print(f"❌ Error loading model: {e}")
-            # Fallback - continue without model (will cause errors but won't crash on startup)
-            classifier = None
+            print(f"❌ Model loading error: {e}")
+            traceback.print_exc()
+            return None
     return classifier
 
-def calculate_stress_level(emotion):
-    """Calculate stress level based on emotion"""
-    stress_levels_map = {
-        'Angry': 80,
-        'Disgust': 60,
-        'Fear': 70,
-        'Happy': 10,
-        'Neutral': 30,
-        'Sad': 50,
-        'Surprise': 40,
-        'Stress': 75
-    }
-    return stress_levels_map.get(emotion, 0)
-
-def create_plot(stress_levels_data, emotions_data, emotion_counts_data):
-    """Create stress level plot"""
-    try:
-        plt.figure(figsize=(10, 5))
-        if stress_levels_data:
-            plt.plot(stress_levels_data, label='Stress Level', color='blue')
-        plt.xlabel('Time')
-        plt.ylabel('Stress Level (%)')
-        plt.title('Live Stress Level')
-        plt.legend()
-        plt.grid()
-        plt.tight_layout()
-        
-        # Save the plot to a BytesIO object and encode it to base64
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png')
-        plt.close()
-        buf.seek(0)
-        return base64.b64encode(buf.getvalue()).decode('utf-8')
-    except Exception as e:
-        print(f"Error creating stress plot: {e}")
-        plt.close()
-        return ""
-
-def create_plot_emotions(emotion_counts_data):
-    """Create emotion counts bar plot"""
-    try:
-        plt.figure(figsize=(10, 5))
-        if emotion_counts_data:
-            plt.bar(emotion_counts_data.keys(), emotion_counts_data.values(), color='orange')
-        plt.xlabel('Emotions')
-        plt.ylabel('Counts')
-        plt.title('Facial Emotion Counts')
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        
-        # Save the plot to a BytesIO object and encode it to base64
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png')
-        plt.close()
-        buf.seek(0)
-        return base64.b64encode(buf.getvalue()).decode('utf-8')
-    except Exception as e:
-        print(f"Error creating emotion plot: {e}")
-        plt.close()
-        return ""
-
-def generate_frames():
-    """Generate video frames with emotion detection"""
-    global emotions, stress_levels, emotion_counts
-    
-    camera = cv2.VideoCapture(0)
-    
-    # Check if camera is available
-    if not camera.isOpened():
-        print("⚠️ Camera not available - this is expected on cloud servers")
-        # On cloud, camera won't work, but that's OK - users use browser webcam
-        camera.release()
-        yield b''
-        return
-
-    try:
-        while True:
-            success, frame = camera.read()
-            if not success:
-                break
-            else:
-                # Get the model
-                model = load_emotion_model()
-                if model is None:
-                    # If model not loaded, just show frame without detection
-                    ret, buffer = cv2.imencode('.jpg', frame)
-                    frame_bytes = buffer.tobytes()
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                    continue
-
-                img_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = face_cascade.detectMultiScale(img_gray, scaleFactor=1.3, minNeighbors=5)
-                
-                for (x, y, w, h) in faces:
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
-                    roi_gray = img_gray[y:y + h, x:x + w]
-                    roi_gray = cv2.resize(roi_gray, (48, 48), interpolation=cv2.INTER_AREA)
-                    
-                    if np.sum([roi_gray]) != 0:
-                        roi = roi_gray.astype('float') / 255.0
-                        roi = img_to_array(roi)
-                        roi = np.expand_dims(roi, axis=0)
-                        
-                        prediction = model.predict(roi)[0]
-                        maxindex = int(np.argmax(prediction))
-                        finalout = emotion_labels[maxindex]
-                        stress_level = calculate_stress_level(finalout)
-                        
-                        stress_levels.append(stress_level)
-                        emotions.append(finalout)
-                        emotion_counts[finalout] += 1
-
-                        stress_percentage = f"Stress Level: {stress_level}%"
-                        label_position = (x, y - 10)
-                        
-                        cv2.putText(frame, stress_percentage, (x, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                        cv2.putText(frame, finalout, label_position, cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-                # Encode the frame in JPEG format
-                ret, buffer = cv2.imencode('.jpg', frame)
-                frame_bytes = buffer.tobytes()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-    finally:
-        camera.release()
+print("\nAttempting to load model...")
+load_emotion_model()
+print("=" * 80)
 
 @app.route('/')
 def index():
     """Home page"""
-    return render_template('index.html')
+    try:
+        print("Loading index.html...")
+        return render_template('index.html')
+    except Exception as e:
+        print(f"❌ Error in index route: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'error': str(e),
+            'type': type(e).__name__
+        }), 500
 
 @app.route('/detection')
 def detection():
     """Detection page"""
-    return render_template('detection.html')
+    try:
+        return render_template('detection.html')
+    except Exception as e:
+        print(f"❌ Error in detection route: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/dashboard')
 def dashboard():
-    """Dashboard with plots"""
-    plot_url_stress = create_plot(stress_levels, emotions, emotion_counts)
-    plot_url_emotions = create_plot_emotions(emotion_counts)
-    return render_template('dashboard.html', plot_url_stress=plot_url_stress, plot_url_emotions=plot_url_emotions)
+    """Dashboard page"""
+    try:
+        return render_template('dashboard.html')
+    except Exception as e:
+        print(f"❌ Error in dashboard route: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/video_feed')
 def video_feed():
     """Video feed endpoint"""
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    try:
+        if cv2 is None:
+            return "OpenCV not available", 500
+        return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    except Exception as e:
+        print(f"❌ Error in video_feed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+def generate_frames():
+    """Generate video frames"""
+    try:
+        camera = cv2.VideoCapture(0)
+        if not camera.isOpened():
+            print("⚠️  Camera not available (expected on cloud)")
+            yield b''
+            return
+        
+        while True:
+            success, frame = camera.read()
+            if not success:
+                break
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+    except Exception as e:
+        print(f"❌ Error in generate_frames: {e}")
+        yield b''
 
 @app.route('/api/stats')
 def get_stats():
     """API endpoint for statistics"""
-    if emotions:
-        most_common_emotion = max(set(emotions), key=emotions.count)
-        avg_stress = sum(stress_levels) / len(stress_levels) if stress_levels else 0
-    else:
-        most_common_emotion = "None"
-        avg_stress = 0
-    
+    try:
+        if emotions:
+            most_common_emotion = max(set(emotions), key=emotions.count)
+            avg_stress = sum(stress_levels) / len(stress_levels) if stress_levels else 0
+        else:
+            most_common_emotion = "None"
+            avg_stress = 0
+        
+        return jsonify({
+            'total_frames': len(emotions),
+            'most_common_emotion': most_common_emotion,
+            'average_stress': round(avg_stress, 2),
+            'emotion_counts': emotion_counts
+        })
+    except Exception as e:
+        print(f"❌ Error in stats: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/health')
+def health():
+    """Health check endpoint"""
     return jsonify({
-        'total_frames': len(emotions),
-        'most_common_emotion': most_common_emotion,
-        'average_stress': round(avg_stress, 2),
-        'emotion_counts': emotion_counts
+        'status': 'ok',
+        'opencv': cv2 is not None,
+        'keras': load_model is not None,
+        'model_loaded': classifier is not None
     })
 
-@app.route('/api/reset')
-def reset_data():
-    """Reset all collected data"""
-    global stress_levels, emotions, emotion_counts
-    stress_levels = []
-    emotions = []
-    emotion_counts = {label: 0 for label in emotion_labels}
-    return jsonify({'status': 'Data reset successfully'})
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'error': 'Not found', 'message': str(error)}), 404
+
+@app.errorhandler(500)
+def server_error(error):
+    print(f"❌ 500 Error: {error}")
+    traceback.print_exc()
+    return jsonify({'error': 'Internal server error', 'message': str(error)}), 500
 
 if __name__ == '__main__':
-    # Load model on startup
-    print("🚀 Loading emotion detection model...")
-    load_emotion_model()
+    print("\n" + "=" * 80)
+    print("🚀 STARTING FLASK APP")
+    print("=" * 80)
     
-    # Production settings
     port = int(os.environ.get('PORT', 10000))
     debug = os.environ.get('DEBUG', 'False') == 'True'
+    
+    print(f"Port: {port}")
+    print(f"Debug: {debug}")
+    print("=" * 80 + "\n")
     
     app.run(
         debug=debug,
@@ -232,148 +205,3 @@ if __name__ == '__main__':
         port=port,
         threaded=True
     )
-# 
-# 
-# 
-# 
-
-# from flask import Flask, render_template, Response, jsonify, request
-# from flask import Flask, render_template, Response, jsonify, request
-
-# from PIL import Image
-
-# import matplotlib.pyplot as plt
-# import io
-# import base64
-
-# import cv2
-# import numpy as np
-# from keras.models import load_model
-# from tensorflow.keras.preprocessing.image import img_to_array
-
-# app = Flask(__name__)
-
-# # Load model
-# classifier = load_model('model_78.h5')
-# classifier.load_weights("model_weights_78.h5")
-
-# # Define the emotions
-# emotion_labels = ['Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise', 'Stress']
-
-# # Load face detection model
-# face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-
-# def calculate_stress_level(emotion):
-#     stress_levels = {
-#         'Angry': 80,
-#         'Disgust': 60,
-#         'Fear': 70,
-#         'Happy': 10,
-#         'Neutral': 30,
-#         'Sad': 50,
-#         'Surprise': 40
-#     }
-#     return stress_levels.get(emotion, 0)
-
-# def create_plot(stress_levels, emotions, emotion_counts):
-#     plt.figure(figsize=(10, 5))  # Stress Level Plot
-#     plt.plot(stress_levels, label='Stress Level', color='blue')
-#     plt.xlabel('Time')
-#     plt.ylabel('Stress Level (%)')
-#     plt.title('Live Stress Level')
-#     plt.legend()
-#     plt.grid()
-#     plt.tight_layout()
-    
-#     # Save the plot to a BytesIO object and encode it to base64
-#     buf = io.BytesIO()
-#     plt.savefig(buf, format='png')
-#     plt.close()
-#     buf.seek(0)
-#     return base64.b64encode(buf.getvalue()).decode('utf-8')
-
-# def create_plot_emotions(emotion_counts):
-#     plt.figure(figsize=(10, 5))  # Emotion Counts Plot
-#     plt.bar(emotion_counts.keys(), emotion_counts.values(), color='orange')
-#     plt.xlabel('Emotions')
-#     plt.ylabel('Counts')
-#     plt.title('Facial Emotion Counts')
-#     plt.xticks(rotation=45)
-#     plt.tight_layout()
-    
-#     # Save the plot to a BytesIO object and encode it to base64
-#     buf = io.BytesIO()
-#     plt.savefig(buf, format='png')
-#     plt.close()
-#     buf.seek(0)
-#     return base64.b64encode(buf.getvalue()).decode('utf-8')
-
-# stress_levels = []
-# emotions = []
-# emotion_counts = {label: 0 for label in emotion_labels}  # Initialize emotion counts
-
-# def generate_frames():
-#     global emotions  # Declare emotions as global to modify it
-
-#     camera = cv2.VideoCapture(0)
-
-#     while True:
-#         success, frame = camera.read()
-#         if not success:
-#             break
-#         else:
-#             img_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-#             faces = face_cascade.detectMultiScale(img_gray, scaleFactor=1.3, minNeighbors=5)
-#             for (x, y, w, h) in faces:
-#                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
-#                 roi_gray = img_gray[y:y + h, x:x + w]
-#                 roi_gray = cv2.resize(roi_gray, (48, 48), interpolation=cv2.INTER_AREA)
-#                 if np.sum([roi_gray]) != 0:
-#                     roi = roi_gray.astype('float') / 255.0
-#                     roi = img_to_array(roi)
-#                     roi = np.expand_dims(roi, axis=0)
-#                     prediction = classifier.predict(roi)[0]
-#                     maxindex = int(np.argmax(prediction))
-#                     finalout = emotion_labels[maxindex]
-#                     stress_level = calculate_stress_level(finalout)
-#                     stress_levels.append(stress_level)
-#                     emotions.append(finalout)
-#                     stress_percentage = f"Stress Level: {stress_level}%"
-#                     emotion_counts[finalout] += 1  # Increment the count for the detected emotion
-
-#                     label_position = (x, y - 10)
-#                     cv2.putText(frame, stress_percentage, (x, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-#                     cv2.putText(frame, finalout, label_position, cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-#             # Encode the frame in JPEG format
-#             ret, buffer = cv2.imencode('.jpg', frame)
-#             frame = buffer.tobytes()
-#             yield (b'--frame\r\n'
-#                    b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-# @app.route('/dashboard')
-# def dashboard():
-#     # Create the plots
-#     plot_url_stress = create_plot(stress_levels, emotions, emotion_counts)  # Stress Level Plot
-#     plot_url_emotions = create_plot_emotions(emotion_counts)  # Emotion Counts Plot
-
-#     return render_template('dashboard.html', plot_url_stress=plot_url_stress, plot_url_emotions=plot_url_emotions)  # Render the dashboard HTML template
-
-# @app.route('/')
-# def index():
-#     return render_template('index.html')  # Render the updated HTML template
-
-# @app.route('/detection')
-# def detection():
-#     return render_template('detection.html')  # Render the detection HTML template
-
-
-
-# @app.route('/video_feed')
-
-
-# def video_feed():
-#     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')  # Serve the video feed
-
-# if __name__ == '__main__':
-#     app.run(debug=True)
