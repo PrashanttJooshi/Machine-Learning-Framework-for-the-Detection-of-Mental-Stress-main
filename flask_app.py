@@ -1,4 +1,4 @@
-from flask import Flask, render_Template, Response, jsonify, request
+from flask import Flask, render_template, Response, jsonify, request
 from PIL import Image
 import matplotlib
 matplotlib.use('Agg')
@@ -9,7 +9,8 @@ import os
 import sys
 import traceback
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='Template')
+# app = Flask(__name__)
 
 # Global variables
 stress_levels = []
