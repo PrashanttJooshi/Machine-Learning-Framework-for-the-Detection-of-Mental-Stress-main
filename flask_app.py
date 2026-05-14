@@ -1,4 +1,4 @@
-from flask import Flask, render_template, Response, jsonify, request
+from flask import Flask, render_Template, Response, jsonify, request
 from PIL import Image
 import matplotlib
 matplotlib.use('Agg')
